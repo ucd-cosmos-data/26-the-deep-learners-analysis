@@ -30,6 +30,9 @@ venv/
 !**/data/interim/.gitkeep
 !**/data/processed/.gitkeep
 
+!**/data/interim/
+!**/data/raw/
+
 # Results
 **/results/figures/*
 !**/results/figures/.gitkeep
