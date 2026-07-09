@@ -29,7 +29,7 @@ venv/
 !**/data/processed/music_survey_cleaned.csv
 !**/data/interim/combined_data.csv
 !**/data/raw/music_survey_raw.csv
-!**/data/raw/2023-income-limits.csv
+!**/data/raw/us_income.csv
 !**/data/raw/.gitkeep
 !**/data/interim/.gitkeep
 !**/data/processed/.gitkeep
