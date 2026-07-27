@@ -6,13 +6,14 @@ not direct proof of friendship.
 
 ## Run the EDA
 
-Open `notebooks/EDA-RC.ipynb` and run all cells. The first run reads the raw
-files and builds a dyad-level analysis table; it takes roughly one minute on
-the current workspace.
+Open `notebooks/EDA-RC/EDA-PhysicalvsDigital.ipynb` and run all cells.
+The first run reads the raw files and loads the dyad-level analysis table; it
+takes roughly one minute on the current workspace.
 
-`notebooks/EDA-relationship-types.ipynb` contains a separate temporal EDA. It
-compares class-hour and after-hours proximity, tests whether schedule patterns
-align with digital connections, and explores unlabeled temporal archetypes.
+`notebooks/EDA-RC/EDA-relationship-types.ipynb` contains a separate temporal
+EDA. It compares class-hour and after-hours proximity, tests whether schedule
+patterns align with digital connections, and explores unlabeled temporal
+archetypes.
 
 The notebook uses these default physical-tie criteria:
 
@@ -23,5 +24,6 @@ The notebook uses these default physical-tie criteria:
 These values can be changed in the `load_and_prepare` call. The notebook also
 includes a threshold-sensitivity figure.
 
-Generated tables are written to `data/processed/`, and the nine EDA figures
-are saved to `results/figures/`.
+Generated tables are written to `data/processed/`. The 13 interactive Plotly
+figures are saved as HTML files in `results/figures/`, along with one shared
+`plotly.min.js` file so the figures work offline.

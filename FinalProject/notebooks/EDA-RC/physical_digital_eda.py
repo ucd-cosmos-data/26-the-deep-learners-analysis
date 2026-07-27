@@ -56,11 +56,19 @@ def load_and_prepare(
     **_: object,
 ) -> EDAData:
     """Load the recovered processed features and raw event data."""
-    project = (
-        Path(project_dir)
-        if project_dir is not None
-        else Path(__file__).resolve().parents[1]
-    )
+    if project_dir is not None:
+        project = Path(project_dir)
+    else:
+        source_path = Path(__file__).resolve()
+        project = next(
+            (
+                parent
+                for parent in source_path.parents
+                if (parent / "data" / "raw").exists()
+                and (parent / "data" / "processed").exists()
+            ),
+            source_path.parents[1],
+        )
     raw_dir = project / "data" / "raw"
     processed_dir = project / "data" / "processed"
     figures_dir = project / "results" / "figures"
@@ -863,3 +871,518 @@ def plot_temporal_cluster_profiles(
             ylabel="",
         )
     return _save(fig, data, "13_temporal_cluster_profiles.png"), summary
+
+
+# Interactive Plotly replacements. These retain the notebook API above while
+# saving offline-capable HTML files instead of static PNG images.
+
+def _html(fig, data: EDAData, filename: str):
+    fig.update_layout(template="plotly_white")
+    fig.write_html(
+        data.figures_dir / filename,
+        include_plotlyjs="directory",
+        full_html=True,
+        auto_open=False,
+    )
+    return fig
+
+
+def _heat(frame: pd.DataFrame) -> pd.DataFrame:
+    return (
+        frame.groupby(["weekday", "hour"], observed=True)
+        .size()
+        .unstack(fill_value=0)
+        .reindex(index=range(7), columns=range(24), fill_value=0)
+    )
+
+
+def plot_availability(data: EDAData):
+    import plotly.graph_objects as go
+
+    ordered = data.availability.loc[
+        data.availability.mean(axis=1).sort_values().index
+    ]
+    fig = go.Figure(
+        go.Heatmap(
+            z=ordered.to_numpy(),
+            x=ordered.columns,
+            y=np.arange(len(ordered)),
+            colorscale="Viridis",
+            zmin=0,
+            zmax=1,
+            colorbar_title="Available fraction",
+            hovertemplate="Sorted participant %{y}<br>Day %{x}<br>Available %{z:.1%}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=f"Bluetooth availability by participant and day (median {ordered.mean(axis=1).median():.1%})",
+        xaxis_title="Relative day (day 0 is Sunday)",
+        yaxis_title="Participants sorted by availability",
+        height=650,
+    )
+    return _html(fig, data, "01_bluetooth_availability.html")
+
+
+def plot_temporal_activity(data: EDAData):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    close = data.close_bluetooth
+    endpoints = pd.concat(
+        [
+            close[["weekday", "hour", "u"]].rename(columns={"u": "user"}),
+            close[["weekday", "hour", "v"]].rename(columns={"v": "user"}),
+        ],
+        ignore_index=True,
+    )
+    active = (
+        endpoints.groupby(["weekday", "hour"], observed=True)["user"]
+        .nunique()
+        .unstack(fill_value=0)
+        .reindex(index=range(7), columns=range(24), fill_value=0)
+    )
+
+    def communication(frame):
+        day = frame["timestamp"] // DAY_SECONDS
+        return _heat(
+            frame.assign(
+                weekday=(day + 6) % 7,
+                hour=(frame["timestamp"] % DAY_SECONDS) // 3600,
+            )
+        )
+
+    matrices = [
+        (_heat(close), "Close Bluetooth observations"),
+        (active, "Distinct active participants"),
+        (communication(data.sms), "SMS messages"),
+        (communication(data.calls), "Calls"),
+    ]
+    fig = make_subplots(rows=2, cols=2, subplot_titles=[x[1] for x in matrices])
+    weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    for i, (matrix, _) in enumerate(matrices):
+        row, col = divmod(i, 2)
+        fig.add_trace(
+            go.Heatmap(
+                z=matrix.to_numpy(),
+                x=matrix.columns,
+                y=weekdays,
+                colorscale="Magma",
+                showscale=i == 3,
+                colorbar_title="Count",
+                hovertemplate="%{y}, %{x}:00<br>Count %{z:,}<extra></extra>",
+            ),
+            row=row + 1,
+            col=col + 1,
+        )
+    fig.update_layout(
+        title="Physical and digital activity by weekday and hour",
+        height=800,
+        width=1200,
+    )
+    return _html(fig, data, "02_temporal_activity_heatmaps.html")
+
+
+def plot_rssi_and_threshold_sensitivity(data: EDAData):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    fb = set(
+        map(tuple, data.dyads.loc[data.dyads.facebook == 1, ["u", "v"]].to_numpy())
+    )
+    rows = []
+    for threshold in range(-90, -64, 5):
+        grouped = (
+            data.bluetooth.loc[data.bluetooth.rssi >= threshold]
+            .groupby(["u", "v"])
+            .agg(intervals=("day", "size"), days=("day", "nunique"))
+            .reset_index()
+        )
+        ties = set(
+            map(
+                tuple,
+                grouped.loc[
+                    (grouped.intervals >= 12) & (grouped.days >= 3), ["u", "v"]
+                ].to_numpy(),
+            )
+        )
+        rows.append((threshold, len(ties), len(ties & fb) / len(ties)))
+    sensitivity = pd.DataFrame(rows, columns=["threshold", "ties", "fb_share"])
+    fig = make_subplots(
+        rows=1, cols=2, specs=[[{}, {"secondary_y": True}]],
+        subplot_titles=["RSSI distribution", "Threshold sensitivity"],
+    )
+    fig.add_trace(
+        go.Histogram(
+            x=data.bluetooth.loc[data.bluetooth.rssi <= 0, "rssi"],
+            nbinsx=50,
+            name="RSSI",
+            marker_color="#4C78A8",
+        ),
+        row=1, col=1,
+    )
+    fig.add_vline(x=-80, line_dash="dash", annotation_text="Default −80", row=1, col=1)
+    fig.add_trace(
+        go.Scatter(
+            x=sensitivity.threshold, y=sensitivity.ties,
+            mode="lines+markers", name="Physical ties",
+        ),
+        row=1, col=2, secondary_y=False,
+    )
+    fig.add_trace(
+        go.Scatter(
+            x=sensitivity.threshold, y=sensitivity.fb_share,
+            mode="lines+markers", name="Facebook share",
+            hovertemplate="%{x} dBm<br>Facebook %{y:.1%}<extra></extra>",
+        ),
+        row=1, col=2, secondary_y=True,
+    )
+    fig.update_yaxes(type="log", title_text="Observations", row=1, col=1)
+    fig.update_yaxes(title_text="Physical ties", row=1, col=2, secondary_y=False)
+    fig.update_yaxes(title_text="Facebook share", tickformat=".0%", row=1, col=2, secondary_y=True)
+    fig.update_layout(title="RSSI and physical-tie sensitivity", height=550, width=1200)
+    return _html(fig, data, "03_rssi_threshold_sensitivity.html")
+
+
+def plot_facebook_proximity_distributions(data: EDAData):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    fig = make_subplots(rows=1, cols=2, subplot_titles=["Tail distribution", "Box plot"])
+    for value, label, color in [
+        (0, "Not Facebook friends", "#4C78A8"),
+        (1, "Facebook friends", "#E45756"),
+    ]:
+        values = np.sort(
+            data.dyads.loc[data.dyads.facebook == value, "close_intervals"].to_numpy()
+        )
+        unique, first = np.unique(values, return_index=True)
+        survival = 1 - first / len(values)
+        fig.add_trace(
+            go.Scatter(
+                x=unique, y=survival, mode="lines", name=label,
+                line_color=color,
+                hovertemplate="At least %{x:,} intervals<br>Share %{y:.2%}<extra></extra>",
+            ),
+            row=1, col=1,
+        )
+        fig.add_trace(
+            go.Box(
+                y=np.log1p(values), name=label, marker_color=color,
+                boxpoints=False, showlegend=False,
+            ),
+            row=1, col=2,
+        )
+    fig.update_xaxes(type="log", title_text="Close intervals", row=1, col=1)
+    fig.update_yaxes(title_text="Share with at least this many", row=1, col=1)
+    fig.update_yaxes(title_text="log(1 + close intervals)", row=1, col=2)
+    fig.update_layout(title="Facebook friendship and physical proximity", height=550, width=1100)
+    return _html(fig, data, "04_facebook_vs_proximity.html")
+
+
+def plot_layer_upset(data: EDAData, top_n: int = 12):
+    import plotly.graph_objects as go
+
+    membership = pd.DataFrame(
+        {
+            "Facebook": data.dyads.facebook.astype(bool),
+            "Calls": data.dyads.call_count.gt(0),
+            "SMS": data.dyads.sms_count.gt(0),
+            "Physical": data.dyads.physical_tie.astype(bool),
+        }
+    )
+    counts = (
+        membership.value_counts().rename("dyads").reset_index().head(top_n)
+    )
+    counts["combination"] = counts.apply(
+        lambda row: " + ".join(
+            layer for layer in ["Facebook", "Calls", "SMS", "Physical"] if row[layer]
+        ) or "No layer",
+        axis=1,
+    )
+    fig = go.Figure(
+        go.Bar(
+            x=counts.combination,
+            y=counts.dyads,
+            text=[f"{x:,}" for x in counts.dyads],
+            textposition="outside",
+            hovertemplate="%{x}<br>Dyads %{y:,}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Exact overlap of digital and physical network layers",
+        xaxis_title="Exact layer combination",
+        yaxis={"title": "Dyads", "type": "log"},
+        height=650,
+    )
+    return _html(fig, data, "05_layer_overlap.html")
+
+
+def plot_digital_vs_physical(data: EDAData):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    communications = np.log1p(data.dyads.call_count + data.dyads.sms_count)
+    proximity = np.log1p(data.dyads.close_intervals)
+    fig = make_subplots(rows=1, cols=2, subplot_titles=["Not Facebook friends", "Facebook friends"])
+    for col, value in enumerate([0, 1], start=1):
+        mask = data.dyads.facebook == value
+        fig.add_trace(
+            go.Histogram2d(
+                x=communications[mask], y=proximity[mask],
+                nbinsx=40, nbinsy=40, colorscale="Magma",
+                showscale=col == 2, colorbar_title="Dyads",
+                hovertemplate="Communication %{x:.2f}<br>Proximity %{y:.2f}<br>Dyads %{z:,}<extra></extra>",
+            ),
+            row=1, col=col,
+        )
+    fig.update_xaxes(title_text="log(1 + calls + SMS)")
+    fig.update_yaxes(title_text="log(1 + close intervals)")
+    fig.update_layout(title="Digital communication versus physical proximity", height=550, width=1100)
+    return _html(fig, data, "06_digital_vs_physical.html")
+
+
+def plot_overlap_strength_curve(data: EDAData):
+    import plotly.graph_objects as go
+
+    ranked = data.dyads.sort_values(["close_intervals", "close_days"], ascending=False)
+    x = (np.arange(len(ranked)) + 1) / len(ranked)
+    fig = go.Figure()
+    for column, label in [("sms_count", "SMS captured"), ("call_count", "Calls captured")]:
+        fig.add_trace(
+            go.Scatter(
+                x=x, y=ranked[column].cumsum() / ranked[column].sum(),
+                mode="lines", name=label,
+                hovertemplate="Top %{x:.2%}<br>Captured %{y:.2%}<extra></extra>",
+            )
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=[0, 1], y=[0, 1], mode="lines", name="Uniform baseline",
+            line={"dash": "dash", "color": "#999"},
+        )
+    )
+    fig.update_layout(
+        title="Communication captured by strongest physical dyads",
+        xaxis={"title": "Top fraction of dyads", "range": [0, 0.25], "tickformat": ".0%"},
+        yaxis={"title": "Communication captured", "range": [0, 1], "tickformat": ".0%"},
+    )
+    return _html(fig, data, "07_overlap_strength_curve.html")
+
+
+def plot_ego_multiplex(data: EDAData, max_neighbors: int = 24):
+    import plotly.graph_objects as go
+
+    dyads = data.dyads.copy()
+    dyads["strength"] = (
+        3 * dyads.facebook
+        + np.log1p(dyads.sms_count)
+        + np.log1p(dyads.call_count)
+        + np.log1p(dyads.close_intervals)
+    )
+    endpoints = pd.concat(
+        [
+            dyads[["u", "strength"]].rename(columns={"u": "user"}),
+            dyads[["v", "strength"]].rename(columns={"v": "user"}),
+        ]
+    )
+    ego = int(endpoints.groupby("user").strength.sum().idxmax())
+    incident = dyads.loc[
+        ((dyads.u == ego) | (dyads.v == ego))
+        & ((dyads.facebook == 1) | (dyads.digital_contact == 1) | (dyads.physical_tie == 1))
+    ].copy()
+    incident["neighbor"] = np.where(incident.u == ego, incident.v, incident.u)
+    neighbors = incident.nlargest(max_neighbors, "strength").neighbor.astype(int).tolist()
+    nodes = [ego] + neighbors
+    selected = dyads.loc[dyads.u.isin(nodes) & dyads.v.isin(nodes)]
+    angles = np.linspace(0, 2 * np.pi, len(neighbors), endpoint=False)
+    pos = {ego: (0.0, 0.0)}
+    pos.update({node: (np.cos(a), np.sin(a)) for node, a in zip(neighbors, angles)})
+    fig = go.Figure()
+    specs = [
+        (selected.close_intervals > 0, "Proximity", "#AAA", "solid"),
+        (selected.facebook == 1, "Facebook", "#4C78A8", "solid"),
+        ((selected.call_count > 0) | (selected.sms_count > 0), "Call or SMS", "#F58518", "dash"),
+    ]
+    for mask, label, color, dash in specs:
+        xs, ys = [], []
+        for row in selected.loc[mask].itertuples():
+            xs += [pos[int(row.u)][0], pos[int(row.v)][0], None]
+            ys += [pos[int(row.u)][1], pos[int(row.v)][1], None]
+        fig.add_trace(
+            go.Scatter(x=xs, y=ys, mode="lines", name=label, line={"color": color, "dash": dash})
+        )
+    fig.add_trace(
+        go.Scatter(
+            x=[pos[n][0] for n in nodes], y=[pos[n][1] for n in nodes],
+            mode="markers+text", text=[str(n) for n in nodes],
+            textposition="top center", name="Participants",
+            marker={"size": [24 if n == ego else 13 for n in nodes],
+                    "color": ["#E45756" if n == ego else "#72B7B2" for n in nodes]},
+            hovertemplate="Participant %{text}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title=f"Multiplex ego network for participant {ego}",
+        xaxis_visible=False, yaxis_visible=False, height=750,
+    )
+    return _html(fig, data, "08_multiplex_ego_network.html")
+
+
+def plot_physical_tie_probability(data: EDAData):
+    import plotly.graph_objects as go
+
+    frame = data.dyads.assign(digital_group=_digital_groups(data.dyads))
+    order = ["No digital edge", "Facebook only", "Calls/SMS only", "Facebook + calls/SMS"]
+    rates = (
+        frame.groupby("digital_group").physical_tie.agg(["mean", "count"])
+        .reindex(order).reset_index()
+    )
+    rates["error"] = 1.96 * np.sqrt(rates["mean"] * (1 - rates["mean"]) / rates["count"])
+    fig = go.Figure(
+        go.Bar(
+            x=rates.digital_group, y=rates["mean"],
+            error_y={"array": rates.error},
+            text=[f"{r:.1%}<br>n={n:,}" for r, n in zip(rates["mean"], rates["count"])],
+            textposition="outside",
+            hovertemplate="%{x}<br>Physical tie %{y:.1%}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Empirical probability of a repeated physical tie",
+        xaxis_title="Observed digital relationship",
+        yaxis={"title": "Physical-tie rate", "tickformat": ".0%", "range": [0, 0.9]},
+    )
+    return _html(fig, data, "09_physical_tie_probability.html")
+
+
+def plot_class_vs_after_hours(data: EDAData):
+    import plotly.graph_objects as go
+
+    ties = data.dyads.loc[data.dyads.physical_tie == 1]
+    x = np.log1p(ties.close_class_hour_intervals)
+    y = np.log1p(ties.close_after_hours_intervals)
+    fig = go.Figure(
+        go.Histogram2d(
+            x=x, y=y, nbinsx=45, nbinsy=45, colorscale="Magma",
+            colorbar_title="Dyads",
+            hovertemplate="Class-hours %{x:.2f}<br>After-hours %{y:.2f}<br>Dyads %{z:,}<extra></extra>",
+        )
+    )
+    maximum = max(x.max(), y.max())
+    fig.add_trace(
+        go.Scatter(x=[0, maximum], y=[0, maximum], mode="lines", name="Equal counts", line_dash="dash")
+    )
+    fig.update_layout(
+        title="When do repeated physical ties interact?",
+        xaxis_title="log(1 + weekday 10 a.m.–2 p.m. intervals)",
+        yaxis_title="log(1 + evening, overnight, or weekend intervals)",
+        height=700,
+    )
+    return _html(fig, data, "10_class_vs_after_hours.html")
+
+
+def plot_schedule_by_digital_relationship(data: EDAData):
+    import plotly.graph_objects as go
+
+    ties = data.dyads.loc[data.dyads.physical_tie == 1].copy()
+    ties["digital_group"] = _digital_groups(ties)
+    order = ["No digital edge", "Facebook only", "Calls/SMS only", "Facebook + calls/SMS"]
+    indicators = {
+        "Weekday 10 a.m.–2 p.m.": ties.close_class_hour_intervals > 0,
+        "9 p.m.–midnight": ties.close_late_evening_intervals > 0,
+        "Weekend": ties.close_weekend_intervals > 0,
+    }
+    fig = go.Figure()
+    for label, indicator in indicators.items():
+        rates = (
+            ties.assign(indicator=indicator)
+            .groupby("digital_group").indicator.mean().reindex(order)
+        )
+        fig.add_trace(
+            go.Bar(
+                x=order, y=rates, name=label,
+                hovertemplate="%{x}<br>" + label + " %{y:.1%}<extra></extra>",
+            )
+        )
+    fig.update_layout(
+        title="Time-of-contact patterns within repeated physical ties",
+        barmode="group",
+        yaxis={"title": "Share with at least one observation", "tickformat": ".0%", "range": [0, 1]},
+    )
+    return _html(fig, data, "11_schedule_by_digital_relationship.html")
+
+
+def plot_temporal_cluster_diagnostics(data: EDAData):
+    import plotly.graph_objects as go
+    from sklearn.cluster import KMeans
+    from sklearn.metrics import silhouette_score
+
+    _, scaled = _cluster_matrix(data)
+    scores = []
+    for k in range(2, 7):
+        labels = KMeans(n_clusters=k, random_state=42, n_init=20).fit_predict(scaled)
+        scores.append(silhouette_score(scaled, labels))
+    fig = go.Figure(
+        go.Scatter(
+            x=list(range(2, 7)), y=scores, mode="lines+markers+text",
+            text=[f"{x:.2f}" for x in scores], textposition="top center",
+            hovertemplate="%{x} clusters<br>Silhouette %{y:.3f}<extra></extra>",
+        )
+    )
+    fig.update_layout(
+        title="Do distinct temporal relationship patterns exist?",
+        xaxis={"title": "Number of clusters", "dtick": 1},
+        yaxis={"title": "Silhouette score", "range": [0, 0.54]},
+    )
+    return _html(fig, data, "12_temporal_cluster_diagnostics.html")
+
+
+def plot_temporal_cluster_profiles(data: EDAData, n_clusters: int = 4):
+    import plotly.graph_objects as go
+    from plotly.subplots import make_subplots
+
+    clustered = _cluster_temporal_dyads(data, n_clusters)
+    events = data.close_bluetooth.merge(
+        clustered[["u", "v", "temporal_archetype"]], on=["u", "v"]
+    )
+    profile = (
+        events.groupby(["u", "v", "temporal_archetype", "weekday", "hour"])
+        .size().rename("count").reset_index()
+    )
+    profile["share"] = profile["count"] / profile.groupby(["u", "v"])["count"].transform("sum")
+    summary = (
+        clustered.groupby("temporal_archetype")
+        .agg(
+            dyads=("physical_tie", "size"),
+            facebook_rate=("facebook", "mean"),
+            direct_communication_rate=("digital_contact", "mean"),
+            median_close_intervals=("close_intervals", "median"),
+            median_close_days=("close_days", "median"),
+            median_class_hour_share=("class_hour_share", "median"),
+            median_after_hours_share=("after_hours_share", "median"),
+        )
+        .sort_values("median_after_hours_share")
+    )
+    titles = [
+        f"{name}<br>n={int(row.dyads):,}; Facebook={row.facebook_rate:.0%}; calls/SMS={row.direct_communication_rate:.0%}"
+        for name, row in summary.iterrows()
+    ]
+    fig = make_subplots(rows=2, cols=2, subplot_titles=titles)
+    weekdays = ["Mon", "Tue", "Wed", "Thu", "Fri", "Sat", "Sun"]
+    for i, name in enumerate(summary.index):
+        matrix = (
+            profile.loc[profile.temporal_archetype == name]
+            .groupby(["weekday", "hour"]).share.mean().unstack(fill_value=0)
+            .reindex(index=range(7), columns=range(24), fill_value=0)
+        )
+        row, col = divmod(i, 2)
+        fig.add_trace(
+            go.Heatmap(
+                z=matrix.to_numpy(), x=matrix.columns, y=weekdays,
+                colorscale="Magma", showscale=i == 3, colorbar_title="Mean share",
+                hovertemplate="%{y}, %{x}:00<br>Mean share %{z:.2%}<extra></extra>",
+            ),
+            row=row + 1, col=col + 1,
+        )
+    fig.update_layout(title="Temporal interaction archetypes", height=850, width=1200)
+    return _html(fig, data, "13_temporal_cluster_profiles.html"), summary
