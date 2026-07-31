@@ -26,6 +26,7 @@ venv/
 **/data/raw/*
 **/data/interim/*
 **/data/processed/*
+**/notebooks/imputed_features.csv
 !**/data/processed/music_survey_cleaned.csv
 !**/data/interim/combined_data.csv
 !**/data/raw/music_survey_raw.csv
