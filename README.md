@@ -1,6 +1,6 @@
 # Data Analysis Repo
 
-Data analysis workspace, organized as a collection of projects.
+Data analysis workspace, organized as a collection of projects. [Final Project Report](https://ucd-cosmos-data.github.io/26-the-deep-learners/report/)
 
 ## Structure
 
@@ -25,3 +25,4 @@ proj*/
 
 1. Copy the structure above into a new `proj*/` directory.
 2. Document the project's purpose, data sources, and key findings in its `README.md`.
+
